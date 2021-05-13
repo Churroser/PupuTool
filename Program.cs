@@ -1,17 +1,28 @@
 ﻿using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using NLog;
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Timers;
 
 namespace PupuTool
 {
-    class Program
+    public class Program
     {
+        //最后签到日期
+        static DateTime? lastSignDate;
+        static TimeSpan time;
+
+        //定时器,一分钟执行一次
+        static System.Timers.Timer daySkipTime = new System.Timers.Timer(1000 * 60 * 1);
+
         static async Task Main(string[] args)
         {
+            LogHelper.WriteCustom(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") + "程序已开启.", "Application\\");
             Console.WriteLine("朴朴签到小助手");
             Console.WriteLine(DateTime.Now.ToString());
 
@@ -22,62 +33,58 @@ namespace PupuTool
             }
 
             main:
-            Console.WriteLine("1.分享任务;2.签到任务");
+            Console.WriteLine("1.分享任务;2.签到任务;3.每天定时自动签到分享;");
             string command = Console.ReadLine();
 
             if (command == "1")
             {
-                //分享
-                Console.WriteLine($"{DateTime.Now} -----开始执行分享任务-----");
-                string shareResultStr = await SignShare();
-                var shareResult = shareResultStr.DeserializeJson<dynamic>();
-                if (shareResult.errcode != 0)
-                {
-                    Console.WriteLine($"{DateTime.Now}  {shareResult.errmsg}");
-                }
-                else
-                {
-                    Console.WriteLine($"{DateTime.Now}  分享成功，获得朴分:{shareResult.data}");
-                }
+                await SignShare();
+                goto main;
             }
             else if (command == "2")
             {
-                //签到
-                Console.WriteLine($"{DateTime.Now} -----开始执行签到任务-----");
-                string signResultStr = await Sign();
-                var signResult = signResultStr.DeserializeJson<dynamic>();
-                if (signResult.errcode != 0)
+                await Sign();
+                goto main;
+            }
+            else if (command == "3")
+            {
+
+                if (await GetConfig("PlanTime") != null && await GetConfig("PlanTime") != "")
                 {
-                    Console.WriteLine($"{DateTime.Now}  {signResult.errmsg}");
-                }
-                else
-                {
-                    Console.WriteLine($"{DateTime.Now}  签到成功，获得朴分:{signResult.data.increased_score}");
-                    //有获得优惠券的情况，待处理
-                    if (signResult.data.reward_coupon_list != "")
+
+                    if (!TimeSpan.TryParse(GetConfig("PlanTime").GetAwaiter().GetResult(), out time))
                     {
-                        /*
-                         {
-                          "errcode": 0,
-                          "errmsg": "",
-                          "data": {
-                            "increased_score": 8,
-                            "reward_coupon_list": [
-                              {
-                                "condition_amount": 4900,
-                                "discount_amount": 500
-                              }
-                            ],
-                            "title": "“来朴朴，一起眼见为食”",
-                            "sub_title": " ",
-                            "current_time": 1620665176566
-                          }
-                        }
-                         */
+                        Console.WriteLine("定时任务时间配置错误,时间不合法");
+                        return;
                     }
+                    time = TimeSpan.Parse(GetConfig("PlanTime").GetAwaiter().GetResult());
+
+                    daySkipTime.Elapsed += new System.Timers.ElapsedEventHandler(TimingTask); //到达时间的时候执行事件；   
+                    daySkipTime.AutoReset = true;   //设置是执行一次（false）还是一直执行(true)；   
+                    daySkipTime.Enabled = true;     //是否执行System.Timers.Timer.Elapsed事件；  
+                    Console.Read();
                 }
             }
-            goto main;
+
+        }
+
+        /// <summary>
+        /// 定时任务
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
+        private static void TimingTask(object sender, ElapsedEventArgs e)
+        {
+            Console.Clear();
+            Console.WriteLine(DateTime.Now);
+
+            if (DateTime.Now.TimeOfDay > time && (!lastSignDate.HasValue || DateTime.Now.Date > lastSignDate))
+            {
+                Sign().GetAwaiter().GetResult();
+                SignShare().GetAwaiter().GetResult();              
+
+                lastSignDate = DateTime.Now.Date;
+            }
         }
 
         /// <summary>
@@ -119,8 +126,11 @@ namespace PupuTool
         /// 分享获得朴分
         /// </summary>
         /// <returns></returns>
-        static async Task<string> SignShare()
+        static async Task SignShare()
         {
+            //分享
+            Console.WriteLine($"{DateTime.Now} -----开始执行分享任务-----");
+
             HttpClient client = new HttpClient();
             HttpContent httpContent = new StringContent("");
             httpContent.Headers.ContentType = new MediaTypeHeaderValue("application/json");
@@ -128,16 +138,31 @@ namespace PupuTool
             client.DefaultRequestHeaders.Add("Authorization", await GetConfig("Authorization"));
             var result = await client.PostAsync("https://j1.pupuapi.com/client/game/sign/share", httpContent);
             string resultStr = await result.Content.ReadAsStringAsync();
-            //Console.WriteLine($"{resultStr}");
-            return resultStr;
+
+            var shareResult = resultStr.DeserializeJson<dynamic>();
+            if (shareResult.errcode != 0)
+            {
+                LogHelper.WriteCustom($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") }{shareResult.errmsg}", "Business\\");
+                Console.WriteLine($"{DateTime.Now}  {shareResult.errmsg}");
+            }
+            else
+            {
+                LogHelper.WriteCustom($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") }分享成功，获得朴分:{shareResult.data}", "Business\\");
+                Console.WriteLine($"{DateTime.Now}  分享成功，获得朴分:{shareResult.data}");
+            }
+
+            return;
         }
 
         /// <summary>
         /// 签到获得朴分
         /// </summary>
         /// <returns></returns>
-        static async Task<string> Sign()
+        static async Task Sign()
         {
+            //签到
+            Console.WriteLine($"{DateTime.Now} -----开始执行签到任务-----");
+
             HttpClient client = new HttpClient();
             HttpContent httpContent = new StringContent("");
             httpContent.Headers.ContentType = new MediaTypeHeaderValue("application/json");
@@ -145,8 +170,52 @@ namespace PupuTool
             client.DefaultRequestHeaders.Add("Authorization", await GetConfig("Authorization"));
             var result = await client.PostAsync("https://j1.pupuapi.com/client/game/sign?city_zip=350100&challenge=", httpContent);
             string resultStr = await result.Content.ReadAsStringAsync();
-            //Console.WriteLine($"{resultStr}");
-            return resultStr;
+
+            var signResult = resultStr.DeserializeJson<Rootobject>();
+            if (signResult.errcode != 0)
+            {
+                LogHelper.WriteCustom($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") } {signResult.errmsg}", "Business\\");
+                Console.WriteLine($"{DateTime.Now}  {signResult.errmsg}");
+            }
+            else
+            {
+                LogHelper.WriteCustom($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") }  签到成功，获得朴分:{signResult.data.increased_score}", "Business\\");
+                Console.WriteLine($"{DateTime.Now}  签到成功，获得朴分:{signResult.data.increased_score}");
+                //有获得优惠券的情况，待处理
+                if (signResult.data.reward_coupon_list != null && signResult.data.reward_coupon_list.Count > 0)
+                {
+                    signResult.data.reward_coupon_list.ForEach(x =>
+                    {
+                        LogHelper.WriteCustom($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") }  获得优惠券:满{x.condition_amount}减{x.discount_amount}", "Business\\");
+                        Console.WriteLine($"获得优惠券:满{x.condition_amount}减{x.discount_amount}");
+                    });
+                }
+            }
+            return;
         }
     }
+
+
+    public class Rootobject
+    {
+        public int errcode { get; set; }
+        public string errmsg { get; set; }
+        public Data data { get; set; }
+    }
+
+    public class Data
+    {
+        public int increased_score { get; set; }
+        public List<Reward_Coupon_List> reward_coupon_list { get; set; }
+        public string title { get; set; }
+        public string sub_title { get; set; }
+        public long current_time { get; set; }
+    }
+
+    public class Reward_Coupon_List
+    {
+        public int condition_amount { get; set; }
+        public int discount_amount { get; set; }
+    }
+
 }
