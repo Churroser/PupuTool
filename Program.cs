@@ -3,8 +3,11 @@ using Newtonsoft.Json.Linq;
 using NLog;
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Timers;
@@ -23,8 +26,7 @@ namespace PupuTool
         static async Task Main(string[] args)
         {
             LogHelper.WriteCustom(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") + "程序已开启.", "Application\\");
-            Console.WriteLine("朴朴签到小助手");
-            Console.WriteLine(DateTime.Now.ToString());
+            Console.WriteLine("朴朴超市自动签到");
 
             if (await GetConfig("Authorization") == null || await GetConfig("Authorization") == "")
             {
@@ -33,7 +35,8 @@ namespace PupuTool
             }
 
             main:
-            Console.WriteLine("1.分享任务;2.签到任务;3.每天定时自动签到分享;");
+            Console.WriteLine("\n请输入你要执行的操作");
+            Console.WriteLine("1.分享任务;2.签到任务;3.每天定时自动签到分享;4.查询朴分");
             string command = Console.ReadLine();
 
             if (command == "1")
@@ -57,13 +60,24 @@ namespace PupuTool
                         Console.WriteLine("定时任务时间配置错误,时间不合法");
                         return;
                     }
+
+                    Sign().GetAwaiter().GetResult();
+                    SignShare().GetAwaiter().GetResult();
+
                     time = TimeSpan.Parse(GetConfig("PlanTime").GetAwaiter().GetResult());
 
                     daySkipTime.Elapsed += new System.Timers.ElapsedEventHandler(TimingTask); //到达时间的时候执行事件；   
                     daySkipTime.AutoReset = true;   //设置是执行一次（false）还是一直执行(true)；   
                     daySkipTime.Enabled = true;     //是否执行System.Timers.Timer.Elapsed事件；  
-                    Console.Read();
+
+                    Console.WriteLine("定时任务执行中,可以执行其他操作");
+                    goto main;
                 }
+            }
+            else if (command == "4")
+            {
+                await GetCoin();
+                goto main;
             }
 
         }
@@ -75,13 +89,11 @@ namespace PupuTool
         /// <param name="e"></param>
         private static void TimingTask(object sender, ElapsedEventArgs e)
         {
-            Console.Clear();
-            Console.WriteLine(DateTime.Now);
-
             if (DateTime.Now.TimeOfDay > time && (!lastSignDate.HasValue || DateTime.Now.Date > lastSignDate))
             {
+                Console.WriteLine($"{DateTime.Now} 开始执行定时任务");
                 Sign().GetAwaiter().GetResult();
-                SignShare().GetAwaiter().GetResult();              
+                SignShare().GetAwaiter().GetResult();
 
                 lastSignDate = DateTime.Now.Date;
             }
@@ -113,12 +125,64 @@ namespace PupuTool
         static async Task<string> GetCoinRecord()
         {
             string t = ((DateTime.Now.ToUniversalTime().Ticks - 621355968000000000) / 10000).ToString();
-            HttpClient client = new HttpClient();
-            client.DefaultRequestHeaders.Add("Authorization", await GetConfig("Authorization"));
-            var result = await client.GetAsync($"https://j1.pupuapi.com/client/coin/record?time_to={t}&page=1&size=20");
-            string resultStr = await result.Content.ReadAsStringAsync();
-            //Console.WriteLine($"{resultStr}");
-            return resultStr;
+            string url = $"https://j1.pupuapi.com/client/coin/record?time_to={t}&page=1&size=20";
+            HttpWebRequest request = null;
+            HttpWebResponse httpResponse = null;
+            request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "GET";
+            request.Headers.Add("Authorization", await GetConfig("Authorization"));
+            try
+            {
+                httpResponse = (HttpWebResponse)request.GetResponse();
+            }
+            catch (WebException ex)
+            {
+                httpResponse = (HttpWebResponse)ex.Response;
+            }
+            Stream st = httpResponse.GetResponseStream();
+            StreamReader reader = new StreamReader(st, Encoding.GetEncoding("utf-8"));
+            string result = reader.ReadToEnd();
+
+            return result;
+        }
+
+        /// <summary>
+        /// 查询朴分余额
+        /// </summary>
+        /// <returns></returns>
+        static async Task GetCoin()
+        {
+            string t = ((DateTime.Now.ToUniversalTime().Ticks - 621355968000000000) / 10000).ToString();
+            string url = $"https://j1.pupuapi.com/client/coin";
+            HttpWebRequest request = null;
+            HttpWebResponse httpResponse = null;
+            request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "GET";
+            request.Headers.Add("Authorization", await GetConfig("Authorization"));
+            try
+            {
+                httpResponse = (HttpWebResponse)request.GetResponse();
+            }
+            catch (WebException ex)
+            {
+                httpResponse = (HttpWebResponse)ex.Response;
+            }
+            Stream st = httpResponse.GetResponseStream();
+            StreamReader reader = new StreamReader(st, Encoding.GetEncoding("utf-8"));
+            string resultStr = reader.ReadToEnd();
+            var result = resultStr.DeserializeJson<dynamic>();
+            if (result.errcode != 0)
+            {
+                Console.WriteLine($"{DateTime.Now}  {result.errmsg}");
+            }
+            else
+            {
+                DateTime UnixTimeStampStart = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                DateTime expireDate = UnixTimeStampStart.AddSeconds(Convert.ToInt64(result.data.expire_time) / 1000).ToLocalTime();
+                Console.WriteLine($"\n{DateTime.Now} 查询积分成功，朴分:{result.data.balance}," +
+                            $"其中 {result.data.expiring_coin} 分将在 {expireDate.ToString("yyyy-MM-dd HH:mm:ss")} 过期\n\n");
+            }
+            return;
         }
 
 
