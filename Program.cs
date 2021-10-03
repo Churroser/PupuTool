@@ -20,18 +20,39 @@ namespace PupuTool
         static DateTime? lastSignDate;
         static TimeSpan time;
 
+        //access_token过期时间
+        static DateTime? accessTokenExpires;
+
+        #region 身份信息
+        //登录凭证，2小时过期
+        static string authorization;
+        //昵称
+        static string nickName;
+        //是否绑定手机号
+        static bool isBindPhone;
+        //是否新用户
+        static bool isNewUser;
+        #endregion
+
         //定时器,一分钟执行一次
         static System.Timers.Timer daySkipTime = new System.Timers.Timer(1000 * 60 * 1);
 
         static async Task Main(string[] args)
         {
             LogHelper.WriteCustom(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") + "程序已开启.", "Application\\");
-            Console.WriteLine("朴朴超市自动签到");
+            Console.Title = "朴朴超市助手——未登录";
 
-            if (await GetConfig("Authorization") == null || await GetConfig("Authorization") == "")
+            if (await GetConfig("refresh_token") == null || await GetConfig("refresh_token") == "")
             {
-                Console.WriteLine("登录身份未配置");
+                Console.WriteLine("refresh_token未配置");
                 return;
+            }
+            if (await Refresh_token())
+            {
+                Console.Title = $"朴朴超市助手——{nickName}";
+                Console.WriteLine($"昵称:{nickName}\n" +
+                    $"{(isBindPhone ? "已绑定" : "未绑定")}手机号\n" +
+                    $"用户类型:{(isNewUser ? "新用户" : "老用户")}");
             }
 
             main:
@@ -92,6 +113,10 @@ namespace PupuTool
             if (DateTime.Now.TimeOfDay > time && (!lastSignDate.HasValue || DateTime.Now.Date > lastSignDate))
             {
                 Console.WriteLine($"{DateTime.Now} 开始执行定时任务");
+                if (!accessTokenExpires.HasValue || accessTokenExpires < DateTime.Now)
+                {
+                    Refresh_token().GetAwaiter().GetResult();
+                }
                 Sign().GetAwaiter().GetResult();
                 SignShare().GetAwaiter().GetResult();
 
@@ -130,7 +155,7 @@ namespace PupuTool
             HttpWebResponse httpResponse = null;
             request = (HttpWebRequest)WebRequest.Create(url);
             request.Method = "GET";
-            request.Headers.Add("Authorization", await GetConfig("Authorization"));
+            request.Headers.Add("Authorization", authorization);
             try
             {
                 httpResponse = (HttpWebResponse)request.GetResponse();
@@ -158,7 +183,7 @@ namespace PupuTool
             HttpWebResponse httpResponse = null;
             request = (HttpWebRequest)WebRequest.Create(url);
             request.Method = "GET";
-            request.Headers.Add("Authorization", await GetConfig("Authorization"));
+            request.Headers.Add("Authorization", authorization);
             try
             {
                 httpResponse = (HttpWebResponse)request.GetResponse();
@@ -199,7 +224,7 @@ namespace PupuTool
             HttpContent httpContent = new StringContent("");
             httpContent.Headers.ContentType = new MediaTypeHeaderValue("application/json");
             httpContent.Headers.ContentType.CharSet = "utf-8";
-            client.DefaultRequestHeaders.Add("Authorization", await GetConfig("Authorization"));
+            client.DefaultRequestHeaders.Add("Authorization", authorization);
             var result = await client.PostAsync("https://j1.pupuapi.com/client/game/sign/share", httpContent);
             string resultStr = await result.Content.ReadAsStringAsync();
 
@@ -231,7 +256,7 @@ namespace PupuTool
             HttpContent httpContent = new StringContent("");
             httpContent.Headers.ContentType = new MediaTypeHeaderValue("application/json");
             httpContent.Headers.ContentType.CharSet = "utf-8";
-            client.DefaultRequestHeaders.Add("Authorization", await GetConfig("Authorization"));
+            client.DefaultRequestHeaders.Add("Authorization", authorization);
             var result = await client.PostAsync("https://j1.pupuapi.com/client/game/sign?city_zip=350100&challenge=", httpContent);
             string resultStr = await result.Content.ReadAsStringAsync();
 
@@ -251,11 +276,52 @@ namespace PupuTool
                     signResult.data.reward_coupon_list.ForEach(x =>
                     {
                         LogHelper.WriteCustom($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") }  获得优惠券:满{x.condition_amount}减{x.discount_amount}", "Business\\");
-                        Console.WriteLine($"获得优惠券:满{x.condition_amount}减{x.discount_amount}");
+                        Console.WriteLine($"获得优惠券:满{x.condition_amount / 100m}元减{x.discount_amount / 100m}元");
                     });
                 }
             }
             return;
+        }
+
+        /// <summary>
+        /// Refresh_token换access_token,access_token目前的有效期仅2小时
+        /// </summary>
+        /// <returns></returns>
+        static async Task<bool> Refresh_token()
+        {
+            SortedDictionary<string, string> postData = new SortedDictionary<string, string>();
+            postData.Add("refresh_token", await GetConfig("refresh_token"));
+
+            HttpClient client = new HttpClient();
+            HttpContent httpContent = new StringContent(postData.ToJson());
+            httpContent.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            httpContent.Headers.ContentType.CharSet = "utf-8";
+            //client.DefaultRequestHeaders.Add("pp_storeid", "09c4ddb4-d87b-493f-9144-08190bb4f5c1");
+            //client.DefaultRequestHeaders.Add("pp-version", "2021042003");
+            //client.DefaultRequestHeaders.Add("pp-os", "20");
+            //client.DefaultRequestHeaders.Add("mark-num", "12");
+
+            var result = await client.PutAsync("https://cauth.pupuapi.com/clientauth/user/refresh_token", httpContent);
+            string resultStr = await result.Content.ReadAsStringAsync();
+
+            var resultJson = resultStr.DeserializeJson<dynamic>();
+            if (resultJson.errcode != 0)
+            {
+                LogHelper.WriteCustom($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") } {resultJson.errmsg}", "Business\\");
+                Console.WriteLine($"{DateTime.Now}  {resultJson.errmsg}");
+            }
+            else
+            {
+
+                authorization = "Bearer " + resultJson.data.access_token;
+                DateTime UnixTimeStampStart = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                accessTokenExpires = UnixTimeStampStart.AddSeconds(Convert.ToInt64(resultJson.data.expires_in) / 1000).ToLocalTime();
+                nickName = resultJson.data.nick_name;
+                isBindPhone = Convert.ToBoolean(resultJson.data.is_bind_phone);
+                isNewUser = Convert.ToBoolean(resultJson.data.is_new_user);
+                return true;
+            }
+            return false;
         }
     }
 
